@@ -1,0 +1,401 @@
+---
+title: "Group 10 - Time Series Forecasting Final Project"
+author: "Yash Gupta, Arunabh Choudhury, Priyal Desai, Purvi Panchal, Sahana Kumar"
+date: "2023-06-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+------------------------------------------------------------------------
+
+####                                   USA Credit Card Deliquency Rate Forecasting {style="align: center, color: red"}
+
+------------------------------------------------------------------------
+
+#### Install Essential Libraries {style="color: black"}
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+library(fpp3)
+```
+
+#### Import, Read, Mutate the dataset {style="color: black"}
+
+```{r message=FALSE, warning=FALSE}
+del_rate <- readr::read_csv("Delinquency Rate.csv") |>
+  mutate(Quarter=yearquarter(observation_date)) |>
+  select(-observation_date) |>
+  as_tsibble(index = Quarter)
+```
+
+#### View the dataset {style="color: black"}
+
+```{r}
+View(del_rate)
+```
+
+#### Check the frequency of the Dataset {style="color: black"}
+
+```{r}
+frequency(del_rate)
+```
+
+| The frequency of time series is 4, which means the data is Quarterly.
+
+#### Plot the graph of the original dataset {style="color: black"}
+
+```{r fig.align='center', message=FALSE, warning=FALSE, paged.print=FALSE}
+del_rate |> autoplot() + 
+  labs(y="Delinquency Rate", x="Time Period")
+```
+
+## Time Series Decomposition {style="color : Red"}
+
+#### Produce an STL decomposition of the data and describe the strength of trend and seasonality. {style="color: black"}
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE, fig.align='center'}
+del_rate |>
+  model(STL(DRCCLACBN)) |>
+  components() |>
+  autoplot()
+```
+
+```{r}
+del_rate |> features(DRCCLACBN, feat_stl)
+```
+
+#### Seasonality using gg_season. {style="color: black"}
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE, fig.align='center'}
+del_rate |> gg_season()
+```
+
+#### Seasonal Sub-Series Plot {style="color: black"}
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE, fig.align='center'}
+del_rate |> gg_subseries()
+```
+
+## Benchmark Models for Forecasting {style="color: red"}
+
+#### Mean, NAIVE, SNAIVE, Random Walk with Drift, TSLM, STL {style="color: black"}
+
+```{r}
+fit_benchmark <- del_rate |>
+  filter_index(~ "2018 Q4") |>
+  model(
+    Mean = MEAN(DRCCLACBN),
+    Naive = NAIVE(DRCCLACBN),
+    Seasonal_Naive = SNAIVE(DRCCLACBN),
+    Linear_Model = TSLM(DRCCLACBN ~ trend() + season()),
+    Drift = RW(DRCCLACBN ~ drift()),
+    STLF = decomposition_model(STL(DRCCLACBN ~ trend(window = 7), robust = TRUE),NAIVE(season_adjust))
+  )
+```
+
+```{r}
+fit_benchmark |> pivot_longer(everything(), names_to = "Model name",
+                          values_to = "Orders")
+```
+
+#### Forecasts of the benchmark models arranged by increasing values of RMSE {style="color: black"}
+
+```{r}
+forecasts_benchmark <- fit_benchmark |>
+  forecast(h = 17) |>
+  accuracy(del_rate) |>
+  select(.model, .type, RMSE, MAE, MAPE, MASE, RMSSE) |>
+  arrange(RMSE)
+```
+
+#### Plot of all the Benchmark Models {style="color: black"}
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE, fig.align='center'}
+fit_benchmark |>
+  forecast(h = 17) |>
+  autoplot(del_rate)
+```
+
+#### Ljung Box Test {style="color: black"}
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+augment(fit_benchmark) |>
+  features(.innov, ljung_box, lag = 8)
+```
+
+#### The residuals are not white noise suggesting that there is information left uncaptured. These models may not be the best for forecasting. {style="color: blue"}
+
+#### Amongst the benchmark models, the Random Walk with drift gives the best RMSE {style="color: blue"}
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE, fig.align='center'}
+del_rate |>
+  model(
+    Drift = RW(log(DRCCLACBN) ~ drift())
+  ) |>
+  gg_tsresiduals()
+```
+
+#### Lagplot for the dataset {style="color: black"}
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE, fig.align='center'}
+del_rate |> gg_lag(geom = "point")
+```
+
+## ACF and PACF Plot of the Original Data {style="color: red"}
+
+#### ACF Plot of the Dataset {style="color: black"}
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE, fig.align='center'}
+del_rate |> ACF() |> autoplot()
+```
+
+#### PACF Plot of the Dataset {style="color: black"}
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE, fig.align='center'}
+del_rate |> PACF() |> autoplot()
+```
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE, fig.align='center'}
+del_rate |> gg_tsdisplay((DRCCLACBN), plot_type = "partial", lag = 16)
+```
+
+#### Check for Log Transformation {style="color: black"}
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE, fig.align='center'}
+del_rate |> autoplot(
+  log(DRCCLACBN) |> difference(4) |> difference() )
+```
+
+#### Observation: Log transformation is not contributing much to stabilizing the variance.      We will not use log transformation and use the raw data ahead. {style="color: blue"}
+
+## Exponential Smoothing {style="color: red"}
+
+#### Fit various ETS models on the \~85% of the data {style="color: black"}
+
+```{r}
+fit_ets <- del_rate |>
+  filter_index(~ "2018 Q4") |>
+  model(
+    ses = ETS(DRCCLACBN ~ error("A") + trend("N") + season("N")),
+    Holt = ETS(DRCCLACBN ~ error("A") + trend("A") + season("N")),
+    Damped = ETS(DRCCLACBN ~ error("A") + trend("Ad") + season("N")),
+    hw_additive = ETS(DRCCLACBN ~ error("A") + trend("A") + season("A")),
+    hw_multiplicative = ETS(DRCCLACBN ~ error("M") + trend("A") + season("M")),
+    hw_additive_damped = ETS(DRCCLACBN ~ error("A") + trend("Ad") + season("A")),
+    hw_multiplicative_damped = ETS(DRCCLACBN ~ error("M") + trend("Ad") + season("M")),
+    auto = ETS(DRCCLACBN)
+  )
+```
+
+```{r}
+tidy(fit_ets)
+```
+
+```{r}
+fit_ets |> pivot_longer(everything(), names_to = "Model name",
+                        values_to = "Orders")
+```
+
+#### Check for the AICc scores of the models {style="color: black"}
+
+```{r}
+glance(fit_ets) |> arrange(AICc) |> select(.model:BIC)
+```
+
+#### The ETS model generated by the ETS function: ETS(M, Ad, A), is giving the best AICc score {style="color: blue"}
+
+#### Check for the RMSE of the models after fitting the model on the test dataset {style="color: black"}
+
+```{r}
+fit_ets |>
+  forecast(h = 17) |>
+  accuracy(del_rate) |>
+  select(.model, .type, RMSE, MAE, MAPE, MASE, RMSSE) |>
+  arrange(RMSE)
+```
+
+#### The Holt-Winter's additive model with a damped trend is giving the highest RMSE {style="color: blue"}
+
+#### We have decided to strike a balance between the AICc and RMSE.                                Therefore, we selected the auto model generated by the ETS function as the best ETS model. The auto model is ETS(M, Ad, A) {style="color: blue"}
+
+#### Residual Plot for above ETS(M,Ad,A) Model.
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE, fig.align='center'}
+gg_tsresiduals(del_rate |>
+                 filter_index(~ "2018 Q4") |>
+                 model(ETS(DRCCLACBN)))
+```
+
+#### Plot of the forecast using the auto plot {style="color: black"}
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE, fig.align='center'}
+del_rate |>
+  filter_index(~ "2018 Q4") |>
+  model(ETS(DRCCLACBN)) |>
+  forecast(h = 17) |>
+  autoplot(del_rate)
+```
+
+## Stationarity Check of Original Data {style="color: red"}
+
+```{r}
+del_rate |> features(DRCCLACBN, unitroot_kpss)
+```
+
+#### Original Data Not-Stationary, as p-value \< 0.05 {style="color: blue"}
+
+## Stationary Check After Seasonal Differencing {style="color: red"}
+
+#### Taking the first order seasonal differencing {style="color: black"}
+
+```{r}
+del_rate |> features((DRCCLACBN), unitroot_nsdiffs)
+```
+
+#### Checking for the order of non seasonal differencing required after doing first order of seasonal differencing {style="color: black"}
+
+```{r}
+del_rate |> mutate(DRCCLACBN_diff = difference((DRCCLACBN), 4)) |>
+  features(DRCCLACBN_diff, unitroot_ndiffs)
+```
+
+#### The ndiffs and the nsdiffs are giving that zero order of differencing will suffice, which doesn't feel intuitively correct.                                                                                       Decided to pursue a strategy to look at the plots and determine the order of differencing {style="color: blue"}
+
+#### One order of seasonal differencing and then one order of non seasonal differencing {style="color: black"}
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE, fig.align='center'}
+del_rate |> autoplot(
+  DRCCLACBN |> difference(4) |> difference()
+)
+```
+
+```{r}
+del_rate |> features(DRCCLACBN |>
+                     difference(lag = 4) |>
+                     difference(), unitroot_kpss)
+
+```
+
+#### The p-value of the KPSS test after differencing suggests that the data is stationary            with d = 1, D = 1 {style="color: blue"}
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE, fig.align='center'}
+del_rate |> 
+  gg_tsdisplay(difference(DRCCLACBN, 4) |> difference(),
+                         plot_type = "partial", lag = 16) + 
+  labs(title = "Double differenced residual, ACF & PACF plots")
+```
+
+#### ACF Plot
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE, fig.align='center'}
+del_rate |> ACF(
+  DRCCLACBN |> difference(4) |> difference()
+) |> autoplot()
+
+```
+
+#### We can use a seasonal MA (1) model as there is only one significant spike on the lag order = 4 and nothing after that on 8, 12, 16 & 20.
+We can use a non seasonal MA(2) model as there is significant spike on lag order = 2 {style="color: blue"}
+
+#### Also we will test for non seasonal MA(1) {style="color: blue"}
+
+#### PACF Plot
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE,fig.align='center'}
+del_rate |> PACF(
+  DRCCLACBN |> difference(4) |> difference()
+) |> autoplot()
+```
+
+#### Significant spike at lag order 1, non seasonal AR(1) model
+Its difficult to identify the seasonal AR model, we will try a bunch of them {style="color: blue"}
+
+## ARIMA Models {style="color: red"}
+
+#### Initial candidate will be  ARIMA(1,1,2)(0,1,1)
+
+#### Train the model till data upto Q4 2018 which is \~85% of the data and we will forecast on remaining \~15% of the data {style="color: black"}
+
+```{r}
+fit_arima <- del_rate |>
+  filter_index(~ "2018 Q4") |>
+  model(
+    arima_initial = ARIMA(DRCCLACBN ~ pdq(1,1,2) + PDQ(0,1,1)),
+    arima211111 = ARIMA(DRCCLACBN ~ pdq(2,1,1) + PDQ(1,1,1)),
+    arima111111 = ARIMA(DRCCLACBN ~ pdq(1,1,1) + PDQ(1,1,1)),
+    arima112111 = ARIMA(DRCCLACBN ~ pdq(1,1,2) + PDQ(1,1,1)),
+    arima112211 = ARIMA(DRCCLACBN ~ pdq(1,1,2) + PDQ(2,1,1)),
+    arima212111 = ARIMA(DRCCLACBN ~ pdq(2,1,2) + PDQ(1,1,1)),
+    arima111011 = ARIMA(DRCCLACBN ~ pdq(1,1,1) + PDQ(0,1,1)), 
+    auto = ARIMA(DRCCLACBN, stepwise = FALSE, approximation = FALSE)
+  )
+```
+
+```{r}
+fit_arima |> pivot_longer(everything(), names_to = "Model name",
+                     values_to = "Orders")
+```
+
+```{r}
+glance(fit_arima) |> arrange(AICc) |> select(.model:BIC)
+```
+
+#### The best model as per AICc is ARIMA(1,1,1)(1,1,1) {style="color:blue"}
+
+#### Accuracy Measures for Each ARIMA Model {style="color: black"}
+
+```{r}
+fit_arima |>
+  forecast(h = 17) |>
+  accuracy(del_rate) |>
+  select(.model, .type, RMSE, MAE, MAPE, MASE, RMSSE) |>
+  arrange(RMSE)
+```
+
+#### From both the AICc and RMSE, we see contrasting results. So, we decided to strike a balance between AICc and RMSE. {style="color: blue"}
+
+#### We see that ARIMA(1,1,1)(0,1,1) is giving the best balance with a slight trade off in AICc {style="color: blue"}
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE, fig.align='center'}
+del_rate |>
+  filter_index(~ "2018 Q4") |>
+  model(ARIMA(DRCCLACBN ~ pdq(1,1,1) + PDQ(0,1,1))) |>
+  forecast(h = 17) |>
+  autoplot(del_rate)
+```
+
+```{r}
+best_fit_arima <- del_rate |>
+  model(best_arima = ARIMA(DRCCLACBN ~ pdq(1,1,1) + PDQ(1,1,1)))
+```
+
+```{r}
+report(best_fit_arima)
+```
+
+#### Residual Plot for the Best ARIMA Model {style="color: black"}
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE, fig.align='center'}
+gg_tsresiduals(best_fit_arima)
+```
+
+#### The residual plot suggest that the residuals are Homoscedastic or normally distributed. {style="color: blue"}
+
+#### The ACF plot also shows that the residuals are white noise.                                                   So, we are pretty satisfied with the model {style="color: blue"}
+
+#### Ljung Box Test on Final Model {style="color: black"}
+
+```{r}
+augment(best_fit_arima) |>
+  features(.innov, ljung_box, lag = 16, dof = 4)
+```
+
+#### p-value from the ljung box test is high enough, suggesting it is a good model and that no information is left uncaptured. So this model is performing well. {style="color: blue"}
+
+#### ARIMA(1,1,1)(0,1,1)[4] fits the best balance between AICc and RMSE so that is our final model. {style="color: blue"}
+
+------------------------------------------------------------------------
+
+#                                THANK YOU {style="color: red"}
